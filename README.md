@@ -13,13 +13,17 @@ This project is dedicated to developing a user panel for the [Cloudflare-workers
 - **Pages** deployment
 <br>
 
+🌟 If you found **BPB Panel** valuable, Your donations make all the difference 🌟
+- **USDT (TRC20):** `TUeGCozCNL1s5XqGkZ1DtKuCnugJaDnYcc`
+- **Tezos (XTZ):** `tz1RSFQ8jDTZC2UZPwHy55D9XvfnW9KqfZb1`
+
 ## Features
 
 1. **Free**: No cost involved.
 2. **User-Friendly Panel:** Designed for easy navigation, configuration and usage.
 3. **Support Fragment:** Provides support for fragment functionality.
-4. **Ad Blocking (Optional):** Option to block Ads.
-5. **Direct Iran (Optional):** Includes an option for direct access to Iran.
+4. **Block Ads. and Porn (Optional)**
+5. **Bypass Iran and LAN (Optional)**
 6. **Full routing rules:** Bypassing Iran, Blocking Ads, Malwares, Phishing... for Sing-box.
 7. **Chain Proxy:** Capable of adding a chain proxy to fix IP.
 8. **Supports Wide Range of Clients:** Offers subscription links for Xray and Sing-box core clients.
@@ -39,15 +43,18 @@ This project is dedicated to developing a user panel for the [Cloudflare-workers
 <br>
 
 ## Supported Clients
-- **v2rayNG** (1.8.19 or higher)
-- **v2rayN** (6.42 or higher)
-- **Nekobox**
-- **Sing-box** (1.8.10 or higher)
-- **Streisand**
-- **V2Box**
-- **Shadowrocket**
-- **Nekoray**
-- **Hiddify**
+| Client  | Version | Fragment |
+| :-------------: | :-------------: | :-------------: |
+| **v2rayNG**  | 1.8.19 or higher  | :heavy_check_mark: |
+| **v2rayN**  | 6.42 or higher  | :heavy_check_mark: |
+| **Nekobox**  |   | :x: |
+| **Sing-box**  | 1.8.10 or higher  | :x: |
+| **Streisand**  |   | :heavy_check_mark: |
+| **V2Box**  |   | :x: |
+| **Shadowrocket**  |   | :x: |
+| **Nekoray**  |   | :heavy_check_mark: |
+| **Hiddify**  |   | :x: |
+
 
 ---
 

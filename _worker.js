@@ -17,7 +17,7 @@ let proxyIP = proxyIPs[Math.floor(Math.random() * proxyIPs.length)];
 
 let dohURL = 'https://cloudflare-dns.com/dns-query';
 
-let panelVersion = '2.3.3';
+let panelVersion = '2.3.5';
 
 if (!isValidUUID(userID)) {
     throw new Error('uuid is not valid');
@@ -73,36 +73,28 @@ export default {
 
                     case '/panel':
 
-                        if (!env.bpb) {
-                            const errorPage = renderErrorPage('KV Dataset is not properly set!');
+                        if (typeof env.bpb !== 'object') {
+                            const errorPage = renderErrorPage('KV Dataset is not properly set!', null, true);
                             return new Response(errorPage, { status: 200, headers: {'Content-Type': 'text/html'}});
                         }
 
-                        if (request.method === 'POST') {    
-
-                            if (!(await Authenticate(request, env))) {                            
-                                return new Response('Unauthorized', { status: 401 });  
-                            }
+                        let isAuth = await Authenticate(request, env); 
+                        
+                        if (request.method === 'POST') {
                             
+                            if (!isAuth) return new Response('Unauthorized', { status: 401 });             
                             const formData = await request.formData();
                             await updateDataset(env, formData);
 
                             return new Response('Success', { status: 200 });
                         }
-                            
+                        
+                        if (!isAuth) return Response.redirect(`${url.origin}/login`, 302);
+                        if (! await env.bpb.get('proxySettings')) await updateDataset(env);
+                        let fragConfs = await getFragmentConfigs(env, host, 'nekoray');
+                        let homePage = await renderHomePage(request, env, host, fragConfs);
 
-                        if (!(await Authenticate(request, env))) {
-                            return Response.redirect(`${url.origin}/login`, 302);        
-                        }
-
-                        if (! await env.bpb.get('proxySettings')) {
-                            await updateDataset(env);
-                        }
-
-                        const fragConfs = await getFragmentConfigs(env, host, 'nekoray');                        
-                        const htmlPage = await renderHomePage(env, host, fragConfs);
-
-                        return new Response(htmlPage, {
+                        return new Response(homePage, {
                             status: 200,
                             headers: {
                                 'Content-Type': 'text/html',
@@ -117,28 +109,22 @@ export default {
                                                       
                     case '/login':
 
-                        if (!env.bpb) {
-                            const errorPage = renderErrorPage('KV Dataset is not properly set!');
+                        if (typeof env.bpb !== 'object') {
+                            const errorPage = renderErrorPage('KV Dataset is not properly set!', null, true);
                             return new Response(errorPage, { status: 200, headers: {'Content-Type': 'text/html'}});
                         }
 
-                        if (await Authenticate(request, env)) {
-                            return Response.redirect(`${url.origin}/panel`, 302);       
-                        }
+                        let loginAuth = await Authenticate(request, env);
+                        if (loginAuth) return Response.redirect(`${url.origin}/panel`, 302);
 
                         let secretKey = await env.bpb.get('secretKey');
-                        let pwd = await env.bpb.get('pwd');
-
-
-                        if (!pwd) {
-                            await env.bpb.put('pwd', 'admin');
-                        }
+                        const pwd = await env.bpb.get('pwd');
+                        if (!pwd) await env.bpb.put('pwd', 'admin');
 
                         if (!secretKey) {
                             secretKey = generateSecretKey();
                             await env.bpb.put('secretKey', secretKey);
                         }
-
 
                         if (request.method === 'POST') {
                             const password = await request.text();
@@ -187,17 +173,11 @@ export default {
 
                     case '/panel/password':
 
-                        if (!(await Authenticate(request, env))) {                            
-                            return new Response('Unauthorized!', { status: 401 });  
-                        }
-                        
+                        let passAuth = await Authenticate(request, env);
+                        if (!passAuth) return new Response('Unauthorized!', { status: 401 });           
                         const newPwd = await request.text();
                         const oldPwd = await env.bpb.get('pwd');
-
-                        if (newPwd === oldPwd) {
-                            return new Response('Please enter a new Password!', { status: 400 });
-                        }
-
+                        if (newPwd === oldPwd) return new Response('Please enter a new Password!', { status: 400 });
                         await env.bpb.put('pwd', newPwd);
 
                         return new Response('Success', {
@@ -210,7 +190,6 @@ export default {
 
                     default:
                         // return new Response('Not found', { status: 404 });
-                        // For any other path, reverse proxy to 'www.fmprc.gov.cn' and return the original response
                         url.hostname = 'www.speedtest.net';
                         url.protocol = 'https:';
                         request = new Request(url, request);
@@ -221,7 +200,7 @@ export default {
             }
         } catch (err) {
             /** @type {Error} */ let e = err;
-            const errorPage = renderErrorPage('Something went wrong!', e.toString());
+            const errorPage = renderErrorPage('Something went wrong!', e.message.toString(), false);
             return new Response(errorPage, { status: 200, headers: {'Content-Type': 'text/html'}});
         }
     },
@@ -306,7 +285,7 @@ async function vlessOverWSHandler(request) {
 				udpStreamWrite(rawClientData);
 				return;
 			}
-			handleTCPOutBound(remoteSocketWapper, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log);
+			handleTCPOutBound(request, remoteSocketWapper, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log);
 		},
 		close() {
 			log(`readableWebSocketStream is close`);
@@ -336,7 +315,7 @@ async function vlessOverWSHandler(request) {
  * @param {function} log The logging function.
  * @returns {Promise<void>} The remote socket.
  */
-async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log,) {
+async function handleTCPOutBound(request, remoteSocket, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log,) {
 
 	/**
 	 * Connects to a given address and port and writes data to the socket.
@@ -363,7 +342,10 @@ async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawCli
 	 * @returns {Promise<void>} A Promise that resolves when the retry is complete.
 	 */
 	async function retry() {
-		const tcpSocket = await connectAndWrite(proxyIP || addressRemote, portRemote)
+        const { pathname } = new URL(request.url);
+        let panelProxyIP = pathname.split('/')[2];
+        panelProxyIP = panelProxyIP ? atob(panelProxyIP) : undefined;
+		const tcpSocket = await connectAndWrite(panelProxyIP || proxyIP || addressRemote, portRemote);
 		tcpSocket.closed.catch(error => {
 			console.log('retry tcpSocket closed error', error);
 		}).finally(() => {
@@ -786,8 +768,17 @@ async function handleUDPOutBound(webSocket, vlessResponseHeader, log) {
  */
 
 const getNormalConfigs = async (env, hostName, client) => {
+    let proxySettings = {};
     let vlessWsTls = '';
-    const { cleanIPs } = await env.bpb.get("proxySettings", {type: 'json'});
+
+    try {
+        proxySettings = await env.bpb.get("proxySettings", {type: 'json'});
+    } catch (error) {
+        console.log(error);
+        throw new Error(`An error occurred while getting normal configs - ${error}`);
+    }
+
+    const { cleanIPs, proxyIP } = proxySettings;
     const resolved = await resolveDNS(hostName);
     const Addresses = [
         hostName,
@@ -806,7 +797,7 @@ const getNormalConfigs = async (env, hostName, client) => {
         }&sni=${
             randomUpperCase(hostName)
         }&fp=randomized&alpn=http/1.1&path=${
-            encodeURIComponent(`/${getRandomPath(16)}?ed=2560`)
+            encodeURIComponent(`/${getRandomPath(16)}${proxyIP ? `/${btoa(proxyIP)}` : ''}?ed=2560`)
         }#${encodeURIComponent(remark)}\n`;
     });
 
@@ -873,7 +864,7 @@ const buildProxyOutbound = async (proxyParams) => {
             delete proxyOutbound.streamSettings.grpcSettings;
             delete proxyOutbound.streamSettings.wsSettings;
             
-            if (security === 'reality' && !headerType) {
+            if (security === 'reality' && (!headerType || headerType === 'none')) {
                 delete proxyOutbound.streamSettings.tcpSettings;
                 break;
             }
@@ -892,15 +883,13 @@ const buildProxyOutbound = async (proxyParams) => {
             break;
 
         case 'ws':
-            
             proxyOutbound.streamSettings.wsSettings.headers.Host = host;
             proxyOutbound.streamSettings.wsSettings.path = path;
             delete proxyOutbound.streamSettings.grpcSettings;
             delete proxyOutbound.streamSettings.tcpSettings;
             break;
 
-        case 'grpc':
-            
+        case 'grpc':  
             proxyOutbound.streamSettings.grpcSettings.authority = authority;
             proxyOutbound.streamSettings.grpcSettings.serviceName = serviceName;
             proxyOutbound.streamSettings.grpcSettings.multiMode = mode === 'multi';
@@ -917,9 +906,16 @@ const buildProxyOutbound = async (proxyParams) => {
 }
 
 const buildWorkerLessConfig = async (env, client) => {
-    let proxySettings = await env.bpb.get("proxySettings", {type: 'json'});
-    const { remoteDNS, lengthMin,  lengthMax,  intervalMin,  intervalMax, blockAds } = proxySettings;
-    
+    let proxySettings = {};
+
+    try {
+        proxySettings = await env.bpb.get("proxySettings", {type: 'json'});
+    } catch (error) {
+        console.log(error);
+        throw new Error(`An error occurred while generating WorkerLess config - ${error}`);
+    }
+
+    const { remoteDNS, localDNS, lengthMin,  lengthMax,  intervalMin,  intervalMax, blockAds, bypassIran, blockPorn, bypassLAN } = proxySettings;  
     let fakeOutbound = structuredClone(xrayOutboundTemp);
     delete fakeOutbound.mux;
     fakeOutbound.settings.vnext[0].address = 'google.com';
@@ -927,7 +923,7 @@ const buildWorkerLessConfig = async (env, client) => {
     delete fakeOutbound.streamSettings.sockopt;
     fakeOutbound.streamSettings.tlsSettings.serverName = 'google.com';
     fakeOutbound.streamSettings.wsSettings.headers.Host = 'google.com';
-    fakeOutbound.streamSettings.wsSettings.path = '/?ed=2560';
+    fakeOutbound.streamSettings.wsSettings.path = '/';
     delete fakeOutbound.streamSettings.grpcSettings;
     delete fakeOutbound.streamSettings.tcpSettings;
     delete fakeOutbound.streamSettings.realitySettings;
@@ -935,19 +931,18 @@ const buildWorkerLessConfig = async (env, client) => {
 
     let fragConfig = structuredClone(xrayConfigTemp);
     fragConfig.remarks  = '💦 BPB Frag - WorkerLess ⭐'
-    fragConfig.dns.servers[0] = remoteDNS;
-    fragConfig.dns.servers.pop();
+    fragConfig.dns = await buildDNSObject(remoteDNS, localDNS, blockAds, bypassIran, blockPorn, true);
     fragConfig.outbounds[0].settings.domainStrategy = 'UseIP';
     fragConfig.outbounds[0].settings.fragment.length = `${lengthMin}-${lengthMax}`;
     fragConfig.outbounds[0].settings.fragment.interval = `${intervalMin}-${intervalMax}`;
-    fragConfig.outbounds = [{...fragConfig.outbounds[0]}, {...fakeOutbound}, {...fragConfig.outbounds[1]}, {...fragConfig.outbounds[2]}];
-    fragConfig.routing.rules.pop();
-    if (!blockAds) {
-        delete fragConfig.dns.hosts;
-        fragConfig.routing.rules.pop();
-    }
-    fragConfig.routing.rules[1].domain = ["domain:.ir"];
-    fragConfig.routing.rules.shift();
+    fragConfig.outbounds = [
+        {...fragConfig.outbounds[0]}, 
+        {...fragConfig.outbounds[1]}, 
+        {...fakeOutbound}, 
+        {...fragConfig.outbounds[2]}, 
+        {...fragConfig.outbounds[3]}
+    ];
+    fragConfig.routing.rules = buildRoutingRules(localDNS, blockAds, bypassIran, blockPorn, bypassLAN, false, false, true);
     delete fragConfig.routing.balancers;
     delete fragConfig.observatory;
 
@@ -962,7 +957,16 @@ const buildWorkerLessConfig = async (env, client) => {
 const getFragmentConfigs = async (env, hostName, client) => {
     let Configs = [];
     let outbounds = [];
-    let proxySettings = await env.bpb.get("proxySettings", {type: 'json'});
+    let proxySettings = {};
+    let proxyOutbound;
+
+    try {
+        proxySettings = await env.bpb.get("proxySettings", {type: 'json'});
+    } catch (error) {
+        console.log(error);
+        throw new Error(`An error occurred while getting fragment configs - ${error}`);
+    }
+
     const {
         remoteDNS, 
         localDNS, 
@@ -971,20 +975,22 @@ const getFragmentConfigs = async (env, hostName, client) => {
         intervalMin, 
         intervalMax,
         blockAds,
-        bypassIran, 
+        bypassIran,
+        blockPorn,
+        bypassLAN, 
         cleanIPs,
+        proxyIP,
         outProxy,
         outProxyParams
     } = proxySettings;
 
-    let proxyOutbound;
     const resolved = await resolveDNS(hostName);
     const Addresses = [
         hostName,
         "www.speedtest.net",
         ...(cleanIPs ? cleanIPs.split(",") : []),
         ...resolved.ipv4,
-        ...resolved.ipv6.map((ip) => `[${ip}]`),
+        ...resolved.ipv6.map((ip) => `[${ip}]`)
     ];
 
     if (outProxy) {
@@ -992,7 +998,7 @@ const getFragmentConfigs = async (env, hostName, client) => {
         try {
             proxyOutbound = await buildProxyOutbound(proxyParams);
         } catch (error) {
-            console.log(error);
+            console.log('An error occured while parsing chain proxy: ', error);
             proxyOutbound = undefined;
             await env.bpb.put("proxySettings", JSON.stringify({
                 ...proxySettings, 
@@ -1001,8 +1007,9 @@ const getFragmentConfigs = async (env, hostName, client) => {
         }
     }
 
-    Addresses.forEach((addr, index) => {
+    for (let index in Addresses) {
 
+        let addr = Addresses[index];
         let fragConfig = structuredClone(xrayConfigTemp);
         let outbound = structuredClone(xrayOutboundTemp);
         let remark = `💦 BPB Frag - ${addr}`;
@@ -1015,40 +1022,23 @@ const getFragmentConfigs = async (env, hostName, client) => {
         outbound.settings.vnext[0].users[0].id = userID;
         outbound.streamSettings.tlsSettings.serverName = randomUpperCase(hostName);
         outbound.streamSettings.wsSettings.headers.Host = randomUpperCase(hostName);
-        outbound.streamSettings.wsSettings.path = `/${getRandomPath(16)}?ed=2560`;
+        outbound.streamSettings.wsSettings.path = `/${getRandomPath(16)}${proxyIP ? `/${btoa(proxyIP)}` : ''}?ed=2560`;
         
         fragConfig.remarks = remark.length <= 30 ? remark : `${remark.slice(0,29)}...`;;
-        fragConfig.dns.servers[0] = remoteDNS;
-        fragConfig.dns.servers[1].address = localDNS;
+        fragConfig.dns = await buildDNSObject(remoteDNS, localDNS, blockAds, bypassIran, blockPorn);
         fragConfig.outbounds[0].settings.fragment.length = `${lengthMin}-${lengthMax}`;
         fragConfig.outbounds[0].settings.fragment.interval = `${intervalMin}-${intervalMax}`;
-        fragConfig.routing.rules[0].ip = [localDNS];
-
+        
         if (proxyOutbound) {
             fragConfig.outbounds = [{...proxyOutbound}, { ...outbound}, ...fragConfig.outbounds];
+            fragConfig.routing.rules = buildRoutingRules(localDNS, blockAds, bypassIran, blockPorn, bypassLAN, true, false);
         } else {
             fragConfig.outbounds = [{ ...outbound}, ...fragConfig.outbounds];
+            fragConfig.routing.rules = buildRoutingRules(localDNS, blockAds, bypassIran, blockPorn, bypassLAN, false, false);
         }
-
+        
         delete fragConfig.observatory;
         delete fragConfig.routing.balancers;
-        fragConfig.routing.rules.pop();
-
-        if (localDNS === 'localhost' && bypassIran) {
-            fragConfig.dns.servers.pop();
-            fragConfig.routing.rules.splice(0,1);
-        }
-
-        if (!bypassIran) {
-            fragConfig.dns.servers.pop();
-            fragConfig.routing.rules.splice(0,2);
-            fragConfig.routing.rules[0].ip = ["geoip:private"];
-        }
-
-        if (!blockAds) {
-            delete fragConfig.dns.hosts;
-            fragConfig.routing.rules.pop();
-        }
 
         if (client === 'nekoray') {
             fragConfig.inbounds[0].port = 2080;
@@ -1060,47 +1050,32 @@ const getFragmentConfigs = async (env, hostName, client) => {
             config: fragConfig
         }); 
 
-        outbound.tag = `proxy_${index + 1}`;
+        outbound.tag = `prox_${+index + 1}`;
     
         if (proxyOutbound) {
             let proxyOut = structuredClone(proxyOutbound);
-            proxyOut.tag = `out_${index + 1}`;
-            proxyOut.streamSettings.sockopt.dialerProxy = `proxy_${index + 1}`;
+            proxyOut.tag = `out_${+index + 1}`;
+            proxyOut.streamSettings.sockopt.dialerProxy = `prox_${+index + 1}`;
             outbounds.push({...proxyOut}, {...outbound});
         } else {
             outbounds.push({...outbound});
         }
-    });
+    };
 
 
     let bestPing = structuredClone(xrayConfigTemp);
     bestPing.remarks = '💦 BPB Frag - Best Ping 💥';
-    bestPing.dns.servers[0] = remoteDNS;
-    bestPing.dns.servers[1].address = localDNS;
+    bestPing.dns = await buildDNSObject(remoteDNS, localDNS, blockAds, bypassIran, blockPorn);
     bestPing.outbounds[0].settings.fragment.length = `${lengthMin}-${lengthMax}`;
     bestPing.outbounds[0].settings.fragment.interval = `${intervalMin}-${intervalMax}`;
-    bestPing.routing.rules[0].ip = [localDNS];
     bestPing.outbounds = [...outbounds, ...bestPing.outbounds];
-    
-    if (!blockAds) {
-        delete bestPing.dns.hosts;
-        bestPing.routing.rules.splice(3,1);
-    }
-
-    if (localDNS === 'localhost' && bypassIran) {
-        bestPing.dns.servers.pop();
-        bestPing.routing.rules.splice(0,1);
-    }
-    
-    if (!bypassIran) {
-        bestPing.dns.servers.pop();
-        bestPing.routing.rules.splice(0,2);
-        bestPing.routing.rules[0].ip = ["geoip:private"];
-    }
     
     if (proxyOutbound) {
         bestPing.observatory.subjectSelector = ["out"];
         bestPing.routing.balancers[0].selector = ["out"];
+        bestPing.routing.rules = buildRoutingRules(localDNS, blockAds, bypassIran, blockPorn, bypassLAN, true, true);
+    } else {
+        bestPing.routing.rules = buildRoutingRules(localDNS, blockAds, bypassIran, blockPorn, bypassLAN, false, true);
     }
 
     if (client === 'nekoray') {
@@ -1109,6 +1084,8 @@ const getFragmentConfigs = async (env, hostName, client) => {
     }
 
     const workerLessConfig = await buildWorkerLessConfig(env, client);
+
+
     
     Configs.push(
         { address: 'Best-Ping', config: bestPing}, 
@@ -1119,12 +1096,16 @@ const getFragmentConfigs = async (env, hostName, client) => {
 }
 
 const getSingboxConfig = async (env, hostName) => {
-    const {
-        remoteDNS, 
-        localDNS,
-        cleanIPs
-    } = await env.bpb.get("proxySettings", {type: 'json'});
+    let proxySettings = {};
+    
+    try {
+        proxySettings = await env.bpb.get("proxySettings", {type: 'json'});
+    } catch (error) {
+        console.log(error);
+        throw new Error(`An error occurred while getting sing-box configs - ${error}`);
+    }
 
+    const { remoteDNS,  localDNS, cleanIPs, proxyIP } = proxySettings
     let config = structuredClone(singboxConfigTemp);
     config.dns.servers[0].address = remoteDNS;
     config.dns.servers[1].address = localDNS;
@@ -1145,7 +1126,7 @@ const getSingboxConfig = async (env, hostName) => {
         outbound.uuid = userID;
         outbound.tls.server_name = randomUpperCase(hostName);
         outbound.transport.headers.Host = randomUpperCase(hostName);
-        outbound.transport.path += getRandomPath(16);
+        outbound.transport.path = `/${getRandomPath(16)}${proxyIP ? `/${btoa(proxyIP)}` : ''}?ed=2560`;
         config.outbounds.push(outbound);
         config.outbounds[0].outbounds.push(addr);
         config.outbounds[1].outbounds.push(addr);
@@ -1166,7 +1147,10 @@ const updateDataset = async (env, Settings) => {
         intervalMax: Settings?.get('fragmentIntervalMax') || '10',
         blockAds: Settings?.get('block-ads') || false,
         bypassIran: Settings?.get('bypass-iran') || false,
+        blockPorn: Settings?.get('block-porn') || false,
+        bypassLAN: Settings?.get('bypass-lan') || false,
         cleanIPs: Settings?.get('cleanIPs')?.replaceAll(' ', '') || '',
+        proxyIP: Settings?.get('proxyIP') || '',
         outProxy: vlessConfig || '',
         outProxyParams: vlessConfig ? await extractVlessParams(vlessConfig) : ''
     };
@@ -1174,7 +1158,8 @@ const updateDataset = async (env, Settings) => {
     try {    
         await env.bpb.put("proxySettings", JSON.stringify(proxySettings));          
     } catch (error) {
-        throw new error(error);
+        console.log(error);
+        throw new Error(`An error occurred while updating KV - ${error}`);
     }
 }
 
@@ -1219,6 +1204,7 @@ const resolveDNS = async (domain) => {
         return { ipv4, ipv6 };
     } catch (error) {
         console.error('Error resolving DNS:', error);
+        throw new Error(`An error occurred while resolving DNS - ${error}`);
     }
 }
 
@@ -1246,14 +1232,17 @@ const generateSecretKey = () => {
 }
   
 const Authenticate = async (request, env) => {
-    const secretKey = await env.bpb.get('secretKey');
-
+    
     try {
+        const secretKey = await env.bpb.get('secretKey');
         const cookie = request.headers.get('Cookie');
         const cookieMatch = cookie ? cookie.match(/(^|;\s*)jwtToken=([^;]*)/) : null;
         const token = cookieMatch ? cookieMatch.pop() : null;
 
-        if (!token) return false;
+        if (!token) {
+            console.log('token');
+            return false;
+        }
 
         const tokenWithoutBearer = token.startsWith('Bearer ') ? token.slice(7) : token;
         const [encodedHeader, encodedPayload, signature] = tokenWithoutBearer.split('.');
@@ -1271,23 +1260,38 @@ const Authenticate = async (request, env) => {
 
         return true;
     } catch (error) {
-        return false;
+        console.log(error);
+        throw new Error(`An error occurred while authentication - ${error}`);
     }
 }
 
-const renderHomePage = async (env, hostName, fragConfigs) => {
+const renderHomePage = async (request, env, hostName, fragConfigs) => {
+    let proxySettings = {};
+    
+    try {
+        proxySettings = await env.bpb.get("proxySettings", {type: 'json'});
+    } catch (error) {
+        console.log(error);
+        throw new Error(`An error occurred while rendering home page - ${error}`);
+    }
+
     const {
-        remoteDNS, 
-        localDNS, 
-        lengthMin, 
-        lengthMax, 
-        intervalMin, 
-        intervalMax, 
-        blockAds,
-        bypassIran,
-        cleanIPs,
-        outProxy
-    } = await env.bpb.get("proxySettings", {type: 'json'});
+        remoteDNS = '', 
+        localDNS = '', 
+        lengthMin = '', 
+        lengthMax = '', 
+        intervalMin = '', 
+        intervalMax = '', 
+        blockAds = false, 
+        bypassIran = false,
+        blockPorn = false,
+        bypassLAN = false,
+        cleanIPs = '', 
+        proxyIP = '', 
+        outProxy = ''
+    } = proxySettings;
+
+    let regionNames = new Intl.DisplayNames(['en'], {type: 'region'});
 
     const genCustomConfRow = async (configs) => {
         let tableBlock = "";
@@ -1321,6 +1325,7 @@ const renderHomePage = async (env, hostName, fragConfigs) => {
 	<head>
 		<meta charset="UTF-8">
 		<meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>BPB Panel ${panelVersion}</title>
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
         <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" />
 		<style>
@@ -1333,7 +1338,7 @@ const renderHomePage = async (env, hostName, fragConfigs) => {
                 'GRAD' 0,
                 'opsz' 24
             }
-            h1 { font-size: 2.5em; text-align: center; color: #09639f }
+            h1 { font-size: 2.5em; text-align: center; color: #09639f; text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.25); }
 			h2 { margin: 30px 0; text-align: center; color: #3b3b3b; }
 			hr { border: 1px solid #ddd; margin: 20px 0; }
             .footer {
@@ -1441,7 +1446,14 @@ const renderHomePage = async (env, hostName, fragConfigs) => {
 				box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
 			}
 			.table-container { margin-top: 20px; overflow-x: auto; }
-			table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+			table { 
+                width: 100%; 
+                border-collapse: collapse; 
+                margin-bottom: 20px;
+                border-radius: 7px;
+                overflow: hidden;
+                box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+            }
 			th, td { padding: 8px 15px; border-bottom: 1px solid #ddd; }
             td div { display: flex; align-items: center; }
 			th { background-color: #3498db; color: white; font-weight: bold; font-size: 1.1rem; width: 50%;}
@@ -1462,7 +1474,7 @@ const renderHomePage = async (env, hostName, fragConfigs) => {
             .modal-content {
                 background-color: #f9f9f9;
                 margin: auto;
-                padding: 20px;
+                padding: 10px 20px 20px;
                 border: 1px solid #eaeaea;
                 border-radius: 10px;
                 box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
@@ -1499,6 +1511,17 @@ const renderHomePage = async (env, hostName, fragConfigs) => {
             .form-control input[type="password"]:focus { border-color: #3498db; outline: none; }
             #passwordError { color: red; margin-bottom: 10px; }
             .symbol { margin-right: 8px; }
+            .modalQR {
+                display: none;
+                position: fixed;
+                z-index: 1;
+                left: 0;
+                top: 0;
+                width: 100%;
+                height: 100%;
+                overflow: auto;
+                background-color: rgba(0, 0, 0, 0.4);
+            }
             @media only screen and (min-width: 768px) {
                 .form-container { max-width: 70%; }
                 #apply { display: block; margin: 30px auto 0 auto; max-width: 50%; }
@@ -1534,26 +1557,39 @@ const renderHomePage = async (env, hostName, fragConfigs) => {
 					<label for="fragmentIntervalMin">🕞 Interval</label>
 					<div style="display: grid; grid-template-columns: 1fr auto 1fr; align-items: baseline;">
 						<input type="number" id="fragmentIntervalMin" name="fragmentIntervalMin"
-						value="${intervalMin}" max="30" required>
+    						value="${intervalMin}" max="30" required>
 						<span style="text-align: center; white-space: pre;"> - </span>
 						<input type="number" id="fragmentIntervalMax" name="fragmentIntervalMax"
-						value="${intervalMax}" max="30" required>
+    						value="${intervalMax}" max="30" required>
 					</div>
 				</div>
 				<div class="form-control">
 					<label for="outProxy">✈️ Chain Proxy</label>
 					<input type="text" id="outProxy" name="outProxy" value="${outProxy}">
 				</div>
-                <h2>ROUTING RULES ⚙️</h2>
+                <h2>FRAGMENT ROUTING ⚙️</h2>
 				<div class="form-control" style="margin-bottom: 20px;">			
                     <div class="routing">
                         <input type="checkbox" id="block-ads" name="block-ads" style="margin: 0 10px 0 0;" value="true" ${blockAds ? 'checked' : ''}>
-                        <label for="block-ads">Block Ads</label>
+                        <label for="block-ads">Block Ads.&nbsp</label>
                     </div>
                     <div class="routing">
 						<input type="checkbox" id="bypass-iran" name="bypass-iran" style="margin: 0 10px 0 0;;" value="true" ${bypassIran ? 'checked' : ''}>
-                        <label for="bypass-iran">Direct Iran</label>
+                        <label for="bypass-iran">Bypass Iran&nbsp</label>
 					</div>
+                    <div class="routing">
+						<input type="checkbox" id="block-porn" name="block-porn" style="margin: 0 10px 0 0;;" value="true" ${blockPorn ? 'checked' : ''}>
+                        <label for="block-porn">Block Porn</label>
+					</div>
+                    <div class="routing">
+						<input type="checkbox" id="bypass-lan" name="bypass-lan" style="margin: 0 10px 0 0;;" value="true" ${bypassLAN ? 'checked' : ''}>
+                        <label for="bypass-lan">Bypass LAN</label>
+					</div>
+				</div>
+                <h2>PROXY IP ⚙️</h2>
+				<div class="form-control">
+					<label for="proxyIP">📍 IP or Domain</label>
+					<input type="text" id="proxyIP" name="proxyIP" value="${proxyIP}">
 				</div>
                 <h2>CLEAN IP ⚙️</h2>
 				<div class="form-control">
@@ -1575,8 +1611,7 @@ const renderHomePage = async (env, hostName, fragConfigs) => {
 					</div>
 				</div>
 			</form>
-            <hr>
-            
+            <hr>            
 			<h2>NORMAL CONFIGS 🔗</h2>
 			<div class="table-container">
 				<table id="normal-configs-table">
@@ -1604,13 +1639,19 @@ const renderHomePage = async (env, hostName, fragConfigs) => {
                             </div>
                             <div>
                                 <span class="material-symbols-outlined symbol">verified</span>
+                                <span>Hiddify</span>
+                            </div>
+                            <div>
+                                <span class="material-symbols-outlined symbol">verified</span>
                                 <span>Nekoray (Xray)</span>
                             </div>
                         </td>
 						<td>
-                            <button onclick="copyToClipboard('https://${hostName}/sub/${userID}#BPB%20Normal', false)">
-                                Copy Sub
-                                <span class="material-symbols-outlined">format_list_bulleted</span>
+                            <button onclick="openQR('https://${hostName}/sub/${userID}#BPB-Normal', 'Normal Subscription')" style="margin-bottom: 8px;">
+                                QR Code&nbsp;<span class="material-symbols-outlined">qr_code</span>
+                            </button>
+                            <button onclick="copyToClipboard('https://${hostName}/sub/${userID}#BPB-Normal', false)">
+                                Copy Sub<span class="material-symbols-outlined">format_list_bulleted</span>
                             </button>
                         </td>
 					</tr>
@@ -1622,17 +1663,12 @@ const renderHomePage = async (env, hostName, fragConfigs) => {
                             </div>
                             <div>
                                 <span class="material-symbols-outlined symbol">verified</span>
-                                <span>Hiddify Next</span>
-                            </div>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
                                 <span>Nekoray (Sing-Box)</span>
                             </div>
                         </td>
 						<td>
                             <button onclick="copyToClipboard('https://${hostName}/sub/${userID}?app=singbox#BPB-Normal', false)">
-                                Copy Sub
-                                <span class="material-symbols-outlined">format_list_bulleted</span>
+                                Copy Sub<span class="material-symbols-outlined">format_list_bulleted</span>
                             </button>
 						</td>
 					</tr>
@@ -1644,15 +1680,16 @@ const renderHomePage = async (env, hostName, fragConfigs) => {
                             </div>
                         </td>
                         <td>
+                            <button onclick="openQR('sing-box://import-remote-profile?url=https://${hostName}/sub/${userID}?app=sfa#BPB-Normal', 'Normal Subscription')" style="margin-bottom: 8px;">
+                                QR Code&nbsp;<span class="material-symbols-outlined">qr_code</span>
+                            </button>
                             <button onclick="copyToClipboard('https://${hostName}/sub/${userID}?app=sfa#BPB-Normal', false)">
-                                Copy Sub
-                                <span class="material-symbols-outlined">format_list_bulleted</span>
+                                Copy Sub<span class="material-symbols-outlined">format_list_bulleted</span>
                             </button>
                         </td>
                     </tr>
 				</table>
 			</div>
-			<hr>
 			<h2>FRAGMENT SUB ⛓️</h2>
 			<div class="table-container">
                 <table id="frag-sub-table">
@@ -1676,9 +1713,11 @@ const renderHomePage = async (env, hostName, fragConfigs) => {
                             </div>
                         </td>
                         <td>
+                            <button onclick="openQR('https://${hostName}/fragsub/${userID}#BPB Fragment', 'Fragment Subscription')" style="margin-bottom: 8px;">
+                                QR Code&nbsp;<span class="material-symbols-outlined">qr_code</span>
+                            </button>
                             <button onclick="copyToClipboard('https://${hostName}/fragsub/${userID}#BPB Fragment', true)">
-                                Copy Sub
-                                <span class="material-symbols-outlined">format_list_bulleted</span>
+                                Copy Sub<span class="material-symbols-outlined">format_list_bulleted</span>
                             </button>
                         </td>
                     </tr>
@@ -1696,22 +1735,32 @@ const renderHomePage = async (env, hostName, fragConfigs) => {
 			</div>
             <div id="myModal" class="modal">
                 <div class="modal-content">
-                <span class="close">&times;</span>
-                <form id="passwordChangeForm">
-                    <h2>Change Password</h2>
-                    <div class="form-control">
-                        <label for="newPassword">New Password</label>
-                        <input type="password" id="newPassword" name="newPassword" required>
+                    <span class="close">&times;</span>
+                    <form id="passwordChangeForm">
+                        <h2>Change Password</h2>
+                        <div class="form-control">
+                            <label for="newPassword">New Password</label>
+                            <input type="password" id="newPassword" name="newPassword" required>
+                            </div>
+                        <div class="form-control">
+                            <label for="confirmPassword">Confirm Password</label>
+                            <input type="password" id="confirmPassword" name="confirmPassword" required>
                         </div>
-                    <div class="form-control">
-                        <label for="confirmPassword">Confirm Password</label>
-                        <input type="password" id="confirmPassword" name="confirmPassword" required>
-                    </div>
-                    <div id="passwordError" style="color: red; margin-bottom: 10px;"></div>
-                    <button id="changePasswordBtn" type="submit" class="button">Change Password</button>
-                </form>
+                        <div id="passwordError" style="color: red; margin-bottom: 10px;"></div>
+                        <button id="changePasswordBtn" type="submit" class="button">Change Password</button>
+                    </form>
                 </div>
             </div>
+            <div id="myQRModal" class="modalQR">
+                <div class="modal-content" style="width: auto; text-align: center;">
+                    <div style="display: flex; flex-direction: column; align-items: center; margin-bottom: 10px;">
+                        <span id="closeQRModal" class="close" style="align-self: flex-end;">&times;</span>
+                        <span id="qrcodeTitle" style="align-self: center; font-weight: bold;"></span>
+                    </div>
+                    <div id="qrcode-container"></div>
+                </div>
+            </div>
+            <hr>
             <div class="footer">
                 <i class="fa fa-github" style="font-size:36px; margin-right: 10px;"></i>
                 <a class="link" href="https://github.com/bia-pain-bache/BPB-Worker-Panel" target="_blank">Github</a>
@@ -1721,9 +1770,11 @@ const renderHomePage = async (env, hostName, fragConfigs) => {
                 </button>
             </div>
         </div>
-
+        
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 	<script>
 		document.addEventListener('DOMContentLoaded', () => {
+            let regionNames = new Intl.DisplayNames(['en'], {type: 'region'});
             const configForm = document.getElementById('configForm');            
             const modal = document.getElementById('myModal');
             const changePass = document.getElementById("openModalBtn");
@@ -1731,6 +1782,9 @@ const renderHomePage = async (env, hostName, fragConfigs) => {
             const passwordChangeForm = document.getElementById('passwordChangeForm');            
             const applyBtn = document.getElementById('applyButton');         
             const initialFormData = new FormData(configForm);
+            const closeQR = document.getElementById("closeQRModal");
+            let modalQR = document.getElementById("myQRModal");
+            let qrcodeContainer = document.getElementById("qrcode-container");
           
             const hasFormDataChanged = () => {
                 const currentFormData = new FormData(configForm);
@@ -1772,8 +1826,36 @@ const renderHomePage = async (env, hostName, fragConfigs) => {
                 modal.style.display = "none";
                 document.body.style.overflow = "";
             });
-
+            closeQR.addEventListener('click', () => {
+                modalQR.style.display = "none";
+                qrcodeContainer.lastElementChild.remove();
+            });
+            window.onclick = (event) => {
+                if (event.target == modalQR) {
+                    modalQR.style.display = "none";
+                    qrcodeContainer.lastElementChild.remove();
+                }
+            }
 		});
+
+        const openQR = (url, title) => {
+            let qrcodeContainer = document.getElementById("qrcode-container");
+            let qrcodeTitle = document.getElementById("qrcodeTitle");
+            const modalQR = document.getElementById("myQRModal");
+            qrcodeTitle.textContent = title;
+            modalQR.style.display = "block";
+            let qrcodeDiv = document.createElement("div");
+            qrcodeDiv.className = "qrcode";
+            new QRCode(qrcodeDiv, {
+                text: url,
+                width: 256,
+                height: 256,
+                colorDark: "#000000",
+                colorLight: "#ffffff",
+                correctLevel: QRCode.CorrectLevel.H
+            });
+            qrcodeContainer.appendChild(qrcodeDiv);
+        }
 
 		const copyToClipboard = (text, decode) => {
             const textarea = document.createElement('textarea');
@@ -1795,6 +1877,7 @@ const renderHomePage = async (env, hostName, fragConfigs) => {
             const lengthMax = getValue('fragmentLengthMax');
             const intervalMin = getValue('fragmentIntervalMin');
             const intervalMax = getValue('fragmentIntervalMax');
+            const proxyIP = document.getElementById('proxyIP').value?.trim();
             const cleanIP = document.getElementById('cleanIPs');
             const cleanIPs = cleanIP.value?.split(',');
             const chainProxy = document.getElementById('outProxy').value?.trim();                    
@@ -1803,11 +1886,12 @@ const renderHomePage = async (env, hostName, fragConfigs) => {
             const hasSecurity = /security=/.test(chainProxy);
             const validSecurityType = /security=(tls|none|reality)/.test(chainProxy);
             const validTransmission = /type=(tcp|grpc|ws)/.test(chainProxy);
+            const validIPDomain = /^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}|(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
 
-            const invalidIPs = cleanIPs?.filter(value => {
+            const invalidIPs = [...cleanIPs, proxyIP]?.filter(value => {
                 if (value !== "") {
                     const trimmedValue = value.trim();
-                    return !/^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}|(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/.test(trimmedValue);
+                    return !validIPDomain.test(trimmedValue);
                 }
             });
     
@@ -1957,13 +2041,8 @@ const renderLoginPage = async () => {
             left: 50%;
             transform: translate(-50%, -50%);
             width: 90%;
-        }        
-        h1 {
-            text-align: center;
-            color: #2980b9;
-            margin-bottom: 30px;
-            margin-top: 0px;
         }
+        h1 { font-size: 2.5rem; text-align: center; color: #09639f; margin: 0 auto 30px; text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.25); }        
         h2 {text-align: center;}
         .form-container {
             background: #f9f9f9;
@@ -2055,7 +2134,7 @@ const renderLoginPage = async () => {
     return html;
 }
 
-const renderErrorPage = (message, error) => {
+const renderErrorPage = (message, error, refer) => {
     return `
     <!DOCTYPE html>
     <html lang="en">
@@ -2074,7 +2153,7 @@ const renderErrorPage = (message, error) => {
                 align-items: center;
                 font-family: system-ui;
             }
-            h1 { text-align: center; color: #2980b9; font-size: 2.5rem; }
+            h1 { font-size: 2.5rem; text-align: center; color: #09639f; text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.25); }
             #error-container { text-align: center; }
         </style>
     </head>
@@ -2083,7 +2162,10 @@ const renderErrorPage = (message, error) => {
         <div id="error-container">
             <h1>BPB Panel <span style="font-size: smaller;">${panelVersion}</span> 💦</h1>
             <div id="error-message">
-                <h2>${message} Please try again or refer to <a href="https://github.com/bia-pain-bache/BPB-Worker-Panel/blob/main/README.md">documents</a></h2>
+                <h2>${message} ${refer 
+                    ? 'Please try again or refer to <a href="https://github.com/bia-pain-bache/BPB-Worker-Panel/blob/main/README.md">documents</a>' 
+                    : ''}
+                </h2>
                 <p><b>${error ? `⚠️ ${error}` : ''}</b></p>
             </div>
         </div>
@@ -2094,23 +2176,10 @@ const renderErrorPage = (message, error) => {
 
 const xrayConfigTemp = {
     remarks: "",
-    dns: {
-        hosts: {
-            "geosite:category-ads-all": "127.0.0.1",
-            "geosite:category-ads-ir": "127.0.0.1"
-        },
-        servers: [
-            "",
-            {
-                address: "",
-                domains: ["geosite:category-ir", "domain:.ir"],
-                expectIPs: ["geoip:ir"],
-                port: 53
-            },
-        ],
-        queryStrategy: "UseIP",
-        tag: "dns"
+    log: {
+        loglevel: "warning",
     },
+    dns: {},
     inbounds: [
         {
             port: 10808,
@@ -2121,23 +2190,26 @@ const xrayConfigTemp = {
                 userLevel: 8,
             },
             sniffing: {
-                destOverride: ["http", "tls", "fakedns"],
+                destOverride: ["http", "tls"],
                 enabled: true,
             },
-            tag: "socks",
+            tag: "socks-in",
         },
         {
             port: 10809,
             protocol: "http",
             settings: {
+                auth: "noauth",
+                udp: true,
                 userLevel: 8,
             },
-            tag: "http",
+            sniffing: {
+                destOverride: ["http", "tls"],
+                enabled: true,
+            },
+            tag: "http-in",
         },
     ],
-    log: {
-        loglevel: "warning",
-    },
     outbounds: [
         {
             tag: "fragment",
@@ -2152,15 +2224,17 @@ const xrayConfigTemp = {
             streamSettings: {
                 sockopt: {
                     tcpKeepAliveIdle: 100,
-                    tcpNoDelay: true
+                    tcpNoDelay: true,
                 },
             },
         },
         {
+            protocol: "dns",
+            tag: "dns-out"
+        },
+        {
             protocol: "freedom",
-            settings: {
-                domainStrategy: "UseIP",
-            },
+            settings: {},
             tag: "direct",
         },
         {
@@ -2171,7 +2245,7 @@ const xrayConfigTemp = {
                 },
             },
             tag: "block",
-        }
+        },
     ],
     policy: {
         levels: {
@@ -2180,62 +2254,35 @@ const xrayConfigTemp = {
                 downlinkOnly: 1,
                 handshake: 4,
                 uplinkOnly: 1,
-            },
+            }
         },
         system: {
             statsOutboundUplink: true,
             statsOutboundDownlink: true,
-        },
+        }
     },
     routing: {
         domainStrategy: "IPIfNonMatch",
-        rules: [
-            {
-                ip: [],
-                outboundTag: "direct",
-                port: "53",
-                type: "field",
-            },
-            {
-                domain: ["geosite:category-ir", "domain:.ir"],
-                outboundTag: "direct",
-                type: "field",
-            },
-            {
-                ip: ["geoip:private", "geoip:ir"],
-                outboundTag: "direct",
-                type: "field",
-            },
-            {
-                domain: ["geosite:category-ads-all", "geosite:category-ads-ir"],
-                outboundTag: "block",
-                type: "field",
-            },
-            {
-                balancerTag: "all",
-                type: "field",
-                network: "tcp,udp",
-            }
-        ],
+        rules: [],
         balancers: [
             {
                 tag: "all",
-                selector: ["proxy"],
+                selector: ["prox"],
                 strategy: {
                     type: "leastPing",
                 },
-            },
-        ],
+            }
+        ]
     },
     observatory: {
         probeInterval: "3m",
         probeURL: "https://api.github.com/_private/browser/stats",
-        subjectSelector: ["proxy"],
+        subjectSelector: ["prox"],
         EnableConcurrency: true,
     },
     stats: {},
 };
-
+  
 const xrayOutboundTemp = 
 {
     mux: {
@@ -2277,9 +2324,7 @@ const xrayOutboundTemp =
             serverName: ""
         },
         wsSettings: {
-            headers: {
-                Host: ""
-            },
+            headers: {Host: ""},
             path: ""
         },
         grpcSettings: {
@@ -2314,7 +2359,7 @@ const xrayOutboundTemp =
                 },
                 type: "http"
             }
-          }
+        }
     },
     tag: "proxy"
 };
@@ -2378,7 +2423,7 @@ const singboxConfigTemp = {
             endpoint_independent_nat: true,
             stack: "mixed",
             sniff: true,
-            sniff_override_destination: false
+            sniff_override_destination: true
         },
         {
             type: "mixed",
@@ -2386,7 +2431,7 @@ const singboxConfigTemp = {
             listen: "127.0.0.1",
             listen_port: 2080,
             sniff: true,
-            sniff_override_destination: false
+            sniff_override_destination: true
         }
     ],
     outbounds: [
@@ -2561,3 +2606,119 @@ const singboxOutboundTemp = {
     },
     tag: ""
 };
+
+const buildDNSObject = async (remoteDNS, localDNS, blockAds, bypassIran, blockPorn, isWorkerLess) => {
+    let dnsObject = {
+        hosts: {},
+        servers: [
+          isWorkerLess ? "https://cloudflare-dns.com/dns-query" : remoteDNS,
+          {
+            address: localDNS,
+            domains: ["geosite:category-ir", "domain:.ir"],
+            expectIPs: ["geoip:ir"],
+            port: 53,
+          },
+        ],
+        tag: "dns",
+    };
+
+    if (isWorkerLess) {
+        const resolvedDOH = await resolveDNS('cloudflare-dns.com');
+        const resolvedCloudflare = await resolveDNS('cloudflare.com');
+        const resolvedCLDomain = await resolveDNS('www.speedtest.net.cdn.cloudflare.net');
+        const resolvedCFNS_1 = await resolveDNS('ben.ns.cloudflare.com');
+        const resolvedCFNS_2 = await resolveDNS('lara.ns.cloudflare.com');
+        dnsObject.hosts['cloudflare-dns.com'] = [
+            ...resolvedDOH.ipv4, 
+            ...resolvedCloudflare.ipv4, 
+            ...resolvedCLDomain.ipv4,
+            ...resolvedCFNS_1.ipv4,
+            ...resolvedCFNS_2.ipv4
+        ];
+    }
+
+    if (blockAds) {
+        dnsObject.hosts["geosite:category-ads-all"] = "127.0.0.1";
+        dnsObject.hosts["geosite:category-ads-ir"] = "127.0.0.1";
+    }
+
+    if (blockPorn) {
+        dnsObject.hosts["geosite:category-porn"] = "127.0.0.1";
+    }
+
+    if (!bypassIran || localDNS === 'localhost' || isWorkerLess) {
+        dnsObject.servers.pop();
+    }
+
+    return dnsObject;
+}
+
+const buildRoutingRules = (localDNS, blockAds, bypassIran, blockPorn, bypassLAN, isChain, isBalancer, isWorkerLess) => {
+    let rules = [
+        {
+          ip: [localDNS],
+          outboundTag: "direct",
+          port: "53",
+          type: "field",
+        },
+        {
+          inboundTag: ["socks-in", "http-in"],
+          type: "field",
+          port: "53",
+          outboundTag: "dns-out",
+          enabled: true,
+        }
+    ];
+
+    if (localDNS === 'localhost' || isWorkerLess) {
+        rules.splice(0,1);
+    }
+
+    if (bypassIran || bypassLAN) {
+        let rule = {
+            ip: [],
+            outboundTag: "direct",
+            type: "field",
+        };
+        
+        if (bypassIran && !isWorkerLess) {
+            rules.push({
+                domain: ["geosite:category-ir", "domain:.ir"],
+                outboundTag: "direct",
+                type: "field",
+            });
+            rule.ip.push("geoip:ir");
+        }
+
+        bypassLAN && rule.ip.push("geoip:private");
+        rules.push(rule);
+    }
+
+    if (blockAds || blockPorn) {
+        let rule = {
+            domain: [],
+            outboundTag: "block",
+            type: "field",
+        };
+
+        blockAds && rule.domain.push("geosite:category-ads-all", "geosite:category-ads-ir");
+        blockPorn && rule.domain.push("geosite:category-porn");
+        rules.push(rule);
+    }
+   
+    if (isBalancer) {
+        rules.push({
+            balancerTag: "all",
+            type: "field",
+            network: "tcp,udp",
+        });
+    } else  {
+        rules.push({
+            outboundTag: isChain ? "out" : isWorkerLess ? "fragment" : "proxy",
+            type: "field",
+            network: "tcp,udp"
+        });
+    }
+
+    return rules;
+}
